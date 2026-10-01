@@ -7,9 +7,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-sys.path.append(
-    str(PROJECT_ROOT)
-)
+sys.path.append(str(PROJECT_ROOT))
 
 
 # ============================================================
@@ -25,9 +23,7 @@ from torch.utils.data import DataLoader
 
 from sklearn.model_selection import train_test_split
 
-from backend.models.dr_classifier import (
-    create_model
-)
+from backend.models.dr_classifier import create_model
 
 from training.config import (
     TRAIN_CSV,
@@ -67,6 +63,17 @@ from training.utils import (
 
 
 # ============================================================
+# CHECKPOINT PATH
+# ============================================================
+
+CHECKPOINT_PATH = (
+    PROJECT_ROOT
+    / "weights"
+    / "dr_training_checkpoint.pth"
+)
+
+
+# ============================================================
 # FOCAL LOSS
 # ============================================================
 
@@ -75,52 +82,48 @@ class FocalLoss(nn.Module):
     def __init__(
         self,
         alpha=None,
-        gamma=2.0
+        gamma=2.0,
     ):
-
         super().__init__()
 
         self.alpha = alpha
-
         self.gamma = gamma
-
 
     def forward(
         self,
         logits,
-        targets
+        targets,
     ):
 
         log_probs = torch.nn.functional.log_softmax(
             logits,
-            dim=1
+            dim=1,
         )
 
-        probs = torch.exp(
-            log_probs
-        )
+        probs = torch.exp(log_probs)
 
         target_log_probs = log_probs.gather(
             1,
-            targets.unsqueeze(1)
+            targets.unsqueeze(1),
         ).squeeze(1)
 
         target_probs = probs.gather(
             1,
-            targets.unsqueeze(1)
+            targets.unsqueeze(1),
         ).squeeze(1)
 
         focal_factor = (
             1.0 - target_probs
         ) ** self.gamma
 
-        loss = -focal_factor * target_log_probs
+        loss = (
+            -focal_factor
+            * target_log_probs
+        )
 
         if self.alpha is not None:
 
-            alpha_t = self.alpha[
-                targets
-            ]
+            alpha_t = self.alpha[targets]
 
             loss = alpha_t * loss
 
@@ -136,7 +139,7 @@ def train_one_epoch(
     loader,
     criterion,
     optimizer,
-    device
+    device,
 ):
 
     model.train()
@@ -144,62 +147,49 @@ def train_one_epoch(
     running_loss = 0.0
 
     all_targets = []
-
     all_predictions = []
-
 
     for images, targets in loader:
 
         images = images.to(
             device,
-            non_blocking=True
+            non_blocking=True,
         )
 
         targets = targets.to(
             device,
-            non_blocking=True
+            non_blocking=True,
         )
-
 
         optimizer.zero_grad(
-            set_to_none=True
+            set_to_none=True,
         )
 
-
-        outputs = model(
-            images
-        )
-
+        outputs = model(images)
 
         loss = criterion(
             outputs,
-            targets
+            targets,
         )
-
 
         loss.backward()
 
-
         torch.nn.utils.clip_grad_norm_(
             model.parameters(),
-            GRADIENT_CLIP_NORM
+            GRADIENT_CLIP_NORM,
         )
-
 
         optimizer.step()
 
-
         running_loss += (
-            loss.item() *
-            images.size(0)
+            loss.item()
+            * images.size(0)
         )
-
 
         predictions = torch.argmax(
             outputs,
-            dim=1
+            dim=1,
         )
-
 
         all_targets.extend(
             targets.detach()
@@ -213,18 +203,15 @@ def train_one_epoch(
             .numpy()
         )
 
-
     epoch_loss = (
-        running_loss /
-        len(loader.dataset)
+        running_loss
+        / len(loader.dataset)
     )
-
 
     metrics = calculate_metrics(
         all_targets,
-        all_predictions
+        all_predictions,
     )
-
 
     return epoch_loss, metrics
 
@@ -238,7 +225,7 @@ def validate(
     model,
     loader,
     criterion,
-    device
+    device,
 ):
 
     model.eval()
@@ -246,45 +233,36 @@ def validate(
     running_loss = 0.0
 
     all_targets = []
-
     all_predictions = []
-
 
     for images, targets in loader:
 
         images = images.to(
             device,
-            non_blocking=True
+            non_blocking=True,
         )
 
         targets = targets.to(
             device,
-            non_blocking=True
+            non_blocking=True,
         )
 
-
-        outputs = model(
-            images
-        )
-
+        outputs = model(images)
 
         loss = criterion(
             outputs,
-            targets
+            targets,
         )
-
 
         running_loss += (
-            loss.item() *
-            images.size(0)
+            loss.item()
+            * images.size(0)
         )
-
 
         predictions = torch.argmax(
             outputs,
-            dim=1
+            dim=1,
         )
-
 
         all_targets.extend(
             targets.cpu().numpy()
@@ -294,20 +272,296 @@ def validate(
             predictions.cpu().numpy()
         )
 
-
     epoch_loss = (
-        running_loss /
-        len(loader.dataset)
+        running_loss
+        / len(loader.dataset)
     )
-
 
     metrics = calculate_metrics(
         all_targets,
-        all_predictions
+        all_predictions,
+    )
+
+    return epoch_loss, metrics
+
+
+# ============================================================
+# SAVE CHECKPOINT
+# ============================================================
+
+def save_checkpoint(
+    epoch,
+    model,
+    optimizer,
+    scheduler,
+    best_macro_f1,
+    best_accuracy,
+    epochs_without_improvement,
+    class_weights,
+):
+
+    CHECKPOINT_PATH.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    checkpoint = {
+
+        "epoch": epoch,
+
+        "model_state_dict":
+            model.state_dict(),
+
+        "optimizer_state_dict":
+            optimizer.state_dict(),
+
+        "scheduler_state_dict":
+            scheduler.state_dict(),
+
+        "best_macro_f1":
+            best_macro_f1,
+
+        "best_accuracy":
+            best_accuracy,
+
+        "epochs_without_improvement":
+            epochs_without_improvement,
+
+        "num_classes":
+            NUM_CLASSES,
+
+        "image_size":
+            IMAGE_SIZE,
+
+        "class_names":
+            CLASS_NAMES,
+
+        "class_weights":
+            class_weights.cpu(),
+
+        "learning_rate":
+            LEARNING_RATE,
+
+        "weight_decay":
+            WEIGHT_DECAY,
+
+        "focal_gamma":
+            FOCAL_GAMMA,
+
+        "random_seed":
+            RANDOM_SEED,
+    }
+
+    temporary_path = CHECKPOINT_PATH.with_suffix(
+        ".tmp"
+    )
+
+    torch.save(
+        checkpoint,
+        temporary_path,
+    )
+
+    # Replace old checkpoint only after
+    # the new checkpoint has been written.
+    temporary_path.replace(
+        CHECKPOINT_PATH
     )
 
 
-    return epoch_loss, metrics
+# ============================================================
+# LOAD CHECKPOINT
+# ============================================================
+
+def load_checkpoint(
+    model,
+    optimizer,
+    scheduler,
+    device,
+):
+
+    if not CHECKPOINT_PATH.exists():
+
+        print(
+            "\nNo training checkpoint found."
+        )
+
+        print(
+            "Starting training from epoch 1."
+        )
+
+        return (
+            1,
+            -1.0,
+            0.0,
+            0,
+        )
+
+    print(
+        "\n" + "=" * 70
+    )
+
+    print(
+        "CHECKPOINT FOUND"
+    )
+
+    print(
+        "=" * 70
+    )
+
+    print(
+        f"Checkpoint: {CHECKPOINT_PATH}"
+    )
+
+    checkpoint = torch.load(
+        CHECKPOINT_PATH,
+        map_location=device,
+        weights_only=False,
+    )
+
+    model.load_state_dict(
+        checkpoint["model_state_dict"]
+    )
+
+    optimizer.load_state_dict(
+        checkpoint["optimizer_state_dict"]
+    )
+
+    scheduler.load_state_dict(
+        checkpoint["scheduler_state_dict"]
+    )
+
+    completed_epoch = int(
+        checkpoint["epoch"]
+    )
+
+    best_macro_f1 = float(
+        checkpoint.get(
+            "best_macro_f1",
+            -1.0,
+        )
+    )
+
+    best_accuracy = float(
+        checkpoint.get(
+            "best_accuracy",
+            0.0,
+        )
+    )
+
+    epochs_without_improvement = int(
+        checkpoint.get(
+            "epochs_without_improvement",
+            0,
+        )
+    )
+
+    next_epoch = (
+        completed_epoch + 1
+    )
+
+    print(
+        f"Completed epoch: "
+        f"{completed_epoch}"
+    )
+
+    print(
+        f"Best Macro-F1: "
+        f"{best_macro_f1:.4f}"
+    )
+
+    print(
+        f"Best Accuracy: "
+        f"{best_accuracy:.4f}"
+    )
+
+    print(
+        f"Next epoch: "
+        f"{next_epoch}"
+    )
+
+    print(
+        "=" * 70
+    )
+
+    return (
+        next_epoch,
+        best_macro_f1,
+        best_accuracy,
+        epochs_without_improvement,
+    )
+
+
+# ============================================================
+# SAVE BEST MODEL
+# ============================================================
+
+def save_best_model(
+    model,
+    epoch,
+    best_macro_f1,
+    best_accuracy,
+    class_weights,
+):
+
+    MODEL_SAVE_PATH.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    checkpoint = {
+
+        "epoch": epoch,
+
+        "model_state_dict":
+            model.state_dict(),
+
+        "num_classes":
+            NUM_CLASSES,
+
+        "image_size":
+            IMAGE_SIZE,
+
+        "best_val_macro_f1":
+            best_macro_f1,
+
+        "best_val_accuracy":
+            best_accuracy,
+
+        "class_names":
+            CLASS_NAMES,
+
+        "class_weights":
+            class_weights.cpu(),
+
+    }
+
+    torch.save(
+        checkpoint,
+        MODEL_SAVE_PATH,
+    )
+
+    print(
+        "\n*** BEST MODEL SAVED ***"
+    )
+
+    print(
+        f"Epoch: {epoch}"
+    )
+
+    print(
+        f"Macro-F1: "
+        f"{best_macro_f1:.4f}"
+    )
+
+    print(
+        f"Accuracy: "
+        f"{best_accuracy:.4f}"
+    )
+
+    print(
+        f"Path: "
+        f"{MODEL_SAVE_PATH}"
+    )
 
 
 # ============================================================
@@ -317,7 +571,11 @@ def validate(
 def main():
 
     print("=" * 70)
-    print("DrishtiAI - Diabetic Retinopathy Training")
+
+    print(
+        "DrishtiAI - Resumable DR Training"
+    )
+
     print("=" * 70)
 
 
@@ -342,7 +600,17 @@ def main():
 
         print(
             "GPU:",
-            torch.cuda.get_device_name(0)
+            torch.cuda.get_device_name(0),
+        )
+
+    else:
+
+        print(
+            "GPU not available."
+        )
+
+        print(
+            "Training will run on CPU."
         )
 
 
@@ -353,38 +621,35 @@ def main():
     if not TRAIN_CSV.exists():
 
         raise FileNotFoundError(
-            f"Training CSV not found: {TRAIN_CSV}"
+            f"Training CSV not found:\n"
+            f"{TRAIN_CSV}"
         )
-
 
     if not TRAIN_IMAGE_DIR.exists():
 
         raise FileNotFoundError(
-            f"Image directory not found: "
+            f"Image directory not found:\n"
             f"{TRAIN_IMAGE_DIR}"
         )
 
 
     # --------------------------------------------------------
-    # LOAD CSV
+    # LOAD DATAFRAME
     # --------------------------------------------------------
 
     df = pd.read_csv(
         TRAIN_CSV
     )
 
-
     required_columns = {
         "id_code",
-        "diagnosis"
+        "diagnosis",
     }
 
-
     missing_columns = (
-        required_columns -
-        set(df.columns)
+        required_columns
+        - set(df.columns)
     )
-
 
     if missing_columns:
 
@@ -395,12 +660,13 @@ def main():
 
 
     print(
-        f"\nTotal dataset images: {len(df)}"
+        f"\nTotal dataset images: "
+        f"{len(df)}"
     )
 
 
     # --------------------------------------------------------
-    # CHECK LABELS
+    # CLASS DISTRIBUTION
     # --------------------------------------------------------
 
     print(
@@ -422,16 +688,18 @@ def main():
         df,
         test_size=VALIDATION_SIZE,
         stratify=df["diagnosis"],
-        random_state=SPLIT_RANDOM_STATE
+        random_state=SPLIT_RANDOM_STATE,
     )
 
 
     print(
-        f"\nTraining samples: {len(train_df)}"
+        f"\nTraining samples: "
+        f"{len(train_df)}"
     )
 
     print(
-        f"Validation samples: {len(val_df)}"
+        f"Validation samples: "
+        f"{len(val_df)}"
     )
 
 
@@ -444,16 +712,15 @@ def main():
         image_dir=TRAIN_IMAGE_DIR,
         transform=get_train_transforms(
             IMAGE_SIZE
-        )
+        ),
     )
-
 
     val_dataset = DRDataset(
         dataframe=val_df,
         image_dir=TRAIN_IMAGE_DIR,
         transform=get_val_transforms(
             IMAGE_SIZE
-        )
+        ),
     )
 
 
@@ -469,9 +736,8 @@ def main():
         pin_memory=torch.cuda.is_available(),
         persistent_workers=(
             NUM_WORKERS > 0
-        )
+        ),
     )
-
 
     val_loader = DataLoader(
         val_dataset,
@@ -481,7 +747,7 @@ def main():
         pin_memory=torch.cuda.is_available(),
         persistent_workers=(
             NUM_WORKERS > 0
-        )
+        ),
     )
 
 
@@ -491,9 +757,8 @@ def main():
 
     class_weights = calculate_class_weights(
         train_df["diagnosis"].values,
-        NUM_CLASSES
+        NUM_CLASSES,
     )
-
 
     class_weights = class_weights.to(
         DEVICE
@@ -521,7 +786,7 @@ def main():
 
     model = create_model(
         num_classes=NUM_CLASSES,
-        device=DEVICE
+        device=DEVICE,
     )
 
 
@@ -531,7 +796,7 @@ def main():
 
     criterion = FocalLoss(
         alpha=class_weights,
-        gamma=FOCAL_GAMMA
+        gamma=FOCAL_GAMMA,
     )
 
 
@@ -542,7 +807,7 @@ def main():
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=LEARNING_RATE,
-        weight_decay=WEIGHT_DECAY
+        weight_decay=WEIGHT_DECAY,
     )
 
 
@@ -550,26 +815,50 @@ def main():
     # SCHEDULER
     # --------------------------------------------------------
 
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="max",
-        factor=SCHEDULER_FACTOR,
-        patience=SCHEDULER_PATIENCE,
-        min_lr=MIN_LR
+    scheduler = (
+        torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="max",
+            factor=SCHEDULER_FACTOR,
+            patience=SCHEDULER_PATIENCE,
+            min_lr=MIN_LR,
+        )
     )
 
 
     # --------------------------------------------------------
-    # BEST MODEL TRACKING
+    # LOAD OR INITIALIZE CHECKPOINT
     # --------------------------------------------------------
 
-    best_macro_f1 = -1.0
+    (
+        start_epoch,
+        best_macro_f1,
+        best_accuracy,
+        epochs_without_improvement,
+    ) = load_checkpoint(
+        model,
+        optimizer,
+        scheduler,
+        DEVICE,
+    )
 
-    best_accuracy = 0.0
 
-    best_epoch = 0
+    # --------------------------------------------------------
+    # ALREADY FINISHED?
+    # --------------------------------------------------------
 
-    epochs_without_improvement = 0
+    if start_epoch > NUM_EPOCHS:
+
+        print(
+            "\nTraining has already reached "
+            f"epoch {NUM_EPOCHS}."
+        )
+
+        print(
+            "Nothing more to train."
+        )
+
+        return
 
 
     # --------------------------------------------------------
@@ -577,13 +866,13 @@ def main():
     # --------------------------------------------------------
 
     print(
-        "\nStarting training..."
+        "\nStarting/resuming training..."
     )
 
 
     for epoch in range(
-        1,
-        NUM_EPOCHS + 1
+        start_epoch,
+        NUM_EPOCHS + 1,
     ):
 
         print(
@@ -603,12 +892,14 @@ def main():
         # TRAIN
         # ----------------------------------------------------
 
-        train_loss, train_metrics = train_one_epoch(
-            model,
-            train_loader,
-            criterion,
-            optimizer,
-            DEVICE
+        train_loss, train_metrics = (
+            train_one_epoch(
+                model,
+                train_loader,
+                criterion,
+                optimizer,
+                DEVICE,
+            )
         )
 
 
@@ -620,24 +911,30 @@ def main():
             model,
             val_loader,
             criterion,
-            DEVICE
+            DEVICE,
         )
 
 
         # ----------------------------------------------------
-        # PRINT
+        # CURRENT LR
         # ----------------------------------------------------
 
-        current_lr = optimizer.param_groups[0]["lr"]
-
-
-        print(
-            f"\nLearning Rate: {current_lr:.8f}"
+        current_lr = (
+            optimizer.param_groups[0]["lr"]
         )
 
 
+        # ----------------------------------------------------
+        # PRINT RESULTS
+        # ----------------------------------------------------
+
         print(
-            f"Train Loss: "
+            f"\nLearning Rate: "
+            f"{current_lr:.8f}"
+        )
+
+        print(
+            f"\nTrain Loss: "
             f"{train_loss:.4f}"
         )
 
@@ -650,7 +947,6 @@ def main():
             f"Train Macro-F1: "
             f"{train_metrics['macro_f1']:.4f}"
         )
-
 
         print(
             f"\nVal Loss: "
@@ -684,7 +980,7 @@ def main():
 
 
         # ----------------------------------------------------
-        # SCHEDULER
+        # UPDATE SCHEDULER
         # ----------------------------------------------------
 
         scheduler.step(
@@ -693,7 +989,7 @@ def main():
 
 
         # ----------------------------------------------------
-        # BEST MODEL
+        # CHECK BEST MODEL
         # ----------------------------------------------------
 
         if (
@@ -709,72 +1005,56 @@ def main():
                 val_metrics["accuracy"]
             )
 
-            best_epoch = epoch
-
             epochs_without_improvement = 0
 
-
-            MODEL_SAVE_PATH.parent.mkdir(
-                parents=True,
-                exist_ok=True
+            save_best_model(
+                model=model,
+                epoch=epoch,
+                best_macro_f1=best_macro_f1,
+                best_accuracy=best_accuracy,
+                class_weights=class_weights,
             )
-
-
-            checkpoint = {
-
-                "epoch": epoch,
-
-                "model_state_dict":
-                    model.state_dict(),
-
-                "num_classes":
-                    NUM_CLASSES,
-
-                "image_size":
-                    IMAGE_SIZE,
-
-                "best_val_macro_f1":
-                    best_macro_f1,
-
-                "best_val_accuracy":
-                    best_accuracy,
-
-                "class_names":
-                    CLASS_NAMES,
-
-                "class_weights":
-                    class_weights.cpu(),
-
-            }
-
-
-            torch.save(
-                checkpoint,
-                MODEL_SAVE_PATH
-            )
-
-
-            print(
-                "\n*** New best model saved ***"
-            )
-
-            print(
-                f"Best Macro-F1: "
-                f"{best_macro_f1:.4f}"
-            )
-
 
         else:
 
             epochs_without_improvement += 1
 
+            print(
+                "\nNo improvement."
+            )
 
             print(
-                f"\nNo improvement."
-                f" Patience: "
+                f"Early stopping patience: "
                 f"{epochs_without_improvement}/"
                 f"{EARLY_STOPPING_PATIENCE}"
             )
+
+
+        # ----------------------------------------------------
+        # SAVE RESUME CHECKPOINT
+        # ----------------------------------------------------
+
+        save_checkpoint(
+            epoch=epoch,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            best_macro_f1=best_macro_f1,
+            best_accuracy=best_accuracy,
+            epochs_without_improvement=(
+                epochs_without_improvement
+            ),
+            class_weights=class_weights,
+        )
+
+
+        print(
+            "\nCheckpoint saved:"
+        )
+
+        print(
+            CHECKPOINT_PATH
+        )
 
 
         # ----------------------------------------------------
@@ -809,25 +1089,30 @@ def main():
         "=" * 70
     )
 
-
     print(
-        f"Best Epoch: "
-        f"{best_epoch}"
-    )
-
-    print(
-        f"Best Validation Macro-F1: "
+        f"Best Macro-F1: "
         f"{best_macro_f1:.4f}"
     )
 
     print(
-        f"Best Validation Accuracy: "
+        f"Best Accuracy: "
         f"{best_accuracy:.4f}"
     )
 
     print(
-        f"Model saved to:"
-        f"\n{MODEL_SAVE_PATH}"
+        f"\nBest model:"
+    )
+
+    print(
+        MODEL_SAVE_PATH
+    )
+
+    print(
+        f"\nResume checkpoint:"
+    )
+
+    print(
+        CHECKPOINT_PATH
     )
 
     print(
