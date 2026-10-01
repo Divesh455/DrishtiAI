@@ -2,75 +2,68 @@ import sys
 from pathlib import Path
 
 # ============================================================
-# PROJECT PATH
+# PROJECT ROOT
 # ============================================================
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.append(str(PROJECT_ROOT))
+sys.path.append(
+    str(PROJECT_ROOT)
+)
 
 
 # ============================================================
 # IMPORTS
 # ============================================================
 
-import random
 import numpy as np
 import pandas as pd
 
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
-from torchvision import transforms
 
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import (
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
-)
 
-from backend.models.dr_classifier import create_model
+from backend.models.dr_classifier import (
+    create_model
+)
 
 from training.config import (
-    IMAGE_SIZE,
+    TRAIN_CSV,
+    TRAIN_IMAGE_DIR,
+    MODEL_SAVE_PATH,
     NUM_CLASSES,
-    BATCH_SIZE,
+    CLASS_NAMES,
+    IMAGE_SIZE,
     NUM_EPOCHS,
+    BATCH_SIZE,
     LEARNING_RATE,
     WEIGHT_DECAY,
-    VALIDATION_SIZE,
+    NUM_WORKERS,
     RANDOM_SEED,
-    CLASS_NAMES,
+    FOCAL_GAMMA,
+    SCHEDULER_FACTOR,
+    SCHEDULER_PATIENCE,
+    MIN_LR,
+    EARLY_STOPPING_PATIENCE,
+    GRADIENT_CLIP_NORM,
     DEVICE,
+    VALIDATION_SIZE,
+    SPLIT_RANDOM_STATE,
 )
 
-from training.dataset import DRDataset
+from training.dataset import (
+    DRDataset,
+    get_train_transforms,
+    get_val_transforms,
+)
 
-
-# ============================================================
-# REPRODUCIBILITY
-# ============================================================
-
-def set_seed(seed: int = RANDOM_SEED):
-    """
-    Make training as reproducible as possible.
-    """
-
-    random.seed(seed)
-    np.random.seed(seed)
-
-    torch.manual_seed(seed)
-
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-
-    # Deterministic behavior
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+from training.utils import (
+    set_seed,
+    calculate_metrics,
+    calculate_class_weights,
+)
 
 
 # ============================================================
@@ -78,47 +71,35 @@ def set_seed(seed: int = RANDOM_SEED):
 # ============================================================
 
 class FocalLoss(nn.Module):
-    """
-    Multi-class Focal Loss.
-
-    Focal Loss gives more importance to difficult examples
-    and reduces the contribution of easy examples.
-
-    alpha:
-        Class-specific weighting.
-
-    gamma:
-        Controls how strongly easy examples are down-weighted.
-    """
 
     def __init__(
         self,
         alpha=None,
-        gamma=2.0,
-        reduction="mean",
+        gamma=2.0
     ):
+
         super().__init__()
 
+        self.alpha = alpha
+
         self.gamma = gamma
-        self.reduction = reduction
 
-        if alpha is not None:
-            self.register_buffer("alpha", alpha)
-        else:
-            self.alpha = None
 
-    def forward(self, logits, targets):
+    def forward(
+        self,
+        logits,
+        targets
+    ):
 
-        # Log probabilities
         log_probs = torch.nn.functional.log_softmax(
             logits,
             dim=1
         )
 
-        # Probabilities
-        probs = torch.exp(log_probs)
+        probs = torch.exp(
+            log_probs
+        )
 
-        # Select target class
         target_log_probs = log_probs.gather(
             1,
             targets.unsqueeze(1)
@@ -129,72 +110,21 @@ class FocalLoss(nn.Module):
             targets.unsqueeze(1)
         ).squeeze(1)
 
-        # Focal modulation
-        focal_factor = (1.0 - target_probs) ** self.gamma
+        focal_factor = (
+            1.0 - target_probs
+        ) ** self.gamma
 
-        # Base loss
         loss = -focal_factor * target_log_probs
 
-        # Class weighting
         if self.alpha is not None:
-            alpha_t = self.alpha[targets]
+
+            alpha_t = self.alpha[
+                targets
+            ]
+
             loss = alpha_t * loss
 
-        if self.reduction == "mean":
-            return loss.mean()
-
-        if self.reduction == "sum":
-            return loss.sum()
-
-        return loss
-
-
-# ============================================================
-# METRICS
-# ============================================================
-
-def calculate_metrics(y_true, y_pred):
-
-    accuracy = accuracy_score(
-        y_true,
-        y_pred
-    )
-
-    macro_precision = precision_score(
-        y_true,
-        y_pred,
-        average="macro",
-        zero_division=0
-    )
-
-    macro_recall = recall_score(
-        y_true,
-        y_pred,
-        average="macro",
-        zero_division=0
-    )
-
-    macro_f1 = f1_score(
-        y_true,
-        y_pred,
-        average="macro",
-        zero_division=0
-    )
-
-    weighted_f1 = f1_score(
-        y_true,
-        y_pred,
-        average="weighted",
-        zero_division=0
-    )
-
-    return {
-        "accuracy": accuracy,
-        "macro_precision": macro_precision,
-        "macro_recall": macro_recall,
-        "macro_f1": macro_f1,
-        "weighted_f1": weighted_f1,
-    }
+        return loss.mean()
 
 
 # ============================================================
@@ -206,66 +136,95 @@ def train_one_epoch(
     loader,
     criterion,
     optimizer,
-    device,
+    device
 ):
 
     model.train()
 
     running_loss = 0.0
 
+    all_targets = []
+
     all_predictions = []
-    all_labels = []
 
-    for images, labels in loader:
 
-        images = images.to(device)
-        labels = labels.to(device)
+    for images, targets in loader:
 
-        optimizer.zero_grad()
+        images = images.to(
+            device,
+            non_blocking=True
+        )
 
-        outputs = model(images)
+        targets = targets.to(
+            device,
+            non_blocking=True
+        )
+
+
+        optimizer.zero_grad(
+            set_to_none=True
+        )
+
+
+        outputs = model(
+            images
+        )
+
 
         loss = criterion(
             outputs,
-            labels
+            targets
         )
+
 
         loss.backward()
 
-        # Prevent unstable gradients
+
         torch.nn.utils.clip_grad_norm_(
             model.parameters(),
-            max_norm=1.0
+            GRADIENT_CLIP_NORM
         )
+
 
         optimizer.step()
 
+
         running_loss += (
-            loss.item() * images.size(0)
+            loss.item() *
+            images.size(0)
         )
+
 
         predictions = torch.argmax(
             outputs,
             dim=1
         )
 
-        all_predictions.extend(
-            predictions.detach().cpu().numpy()
+
+        all_targets.extend(
+            targets.detach()
+            .cpu()
+            .numpy()
         )
 
-        all_labels.extend(
-            labels.detach().cpu().numpy()
+        all_predictions.extend(
+            predictions.detach()
+            .cpu()
+            .numpy()
         )
+
 
     epoch_loss = (
         running_loss /
         len(loader.dataset)
     )
 
+
     metrics = calculate_metrics(
-        all_labels,
+        all_targets,
         all_predictions
     )
+
 
     return epoch_loss, metrics
 
@@ -279,88 +238,76 @@ def validate(
     model,
     loader,
     criterion,
-    device,
+    device
 ):
 
     model.eval()
 
     running_loss = 0.0
 
+    all_targets = []
+
     all_predictions = []
-    all_labels = []
 
-    for images, labels in loader:
 
-        images = images.to(device)
-        labels = labels.to(device)
+    for images, targets in loader:
 
-        outputs = model(images)
+        images = images.to(
+            device,
+            non_blocking=True
+        )
+
+        targets = targets.to(
+            device,
+            non_blocking=True
+        )
+
+
+        outputs = model(
+            images
+        )
+
 
         loss = criterion(
             outputs,
-            labels
+            targets
         )
 
+
         running_loss += (
-            loss.item() * images.size(0)
+            loss.item() *
+            images.size(0)
         )
+
 
         predictions = torch.argmax(
             outputs,
             dim=1
         )
 
+
+        all_targets.extend(
+            targets.cpu().numpy()
+        )
+
         all_predictions.extend(
             predictions.cpu().numpy()
         )
 
-        all_labels.extend(
-            labels.cpu().numpy()
-        )
 
     epoch_loss = (
         running_loss /
         len(loader.dataset)
     )
 
+
     metrics = calculate_metrics(
-        all_labels,
+        all_targets,
         all_predictions
     )
 
+
     return epoch_loss, metrics
-
-
-# ============================================================
-# PRINT METRICS
-# ============================================================
-
-def print_metrics(prefix, metrics):
-
-    print(
-        f"{prefix} Accuracy      : "
-        f"{metrics['accuracy']:.4f}"
-    )
-
-    print(
-        f"{prefix} Precision     : "
-        f"{metrics['macro_precision']:.4f}"
-    )
-
-    print(
-        f"{prefix} Recall        : "
-        f"{metrics['macro_recall']:.4f}"
-    )
-
-    print(
-        f"{prefix} Macro-F1      : "
-        f"{metrics['macro_f1']:.4f}"
-    )
-
-    print(
-        f"{prefix} Weighted-F1   : "
-        f"{metrics['weighted_f1']:.4f}"
-    )
 
 
 # ============================================================
@@ -369,341 +316,228 @@ def print_metrics(prefix, metrics):
 
 def main():
 
-    print()
     print("=" * 70)
-    print("DrishtiAI - IMPROVED DR TRAINING")
+    print("DrishtiAI - Diabetic Retinopathy Training")
     print("=" * 70)
 
-    # --------------------------------------------------------
-    # Seed
-    # --------------------------------------------------------
-
-    set_seed()
-
-    print()
-    print(f"Device: {DEVICE}")
 
     # --------------------------------------------------------
-    # Dataset paths
+    # SEED
     # --------------------------------------------------------
 
-    csv_path = (
-        PROJECT_ROOT /
-        "data" /
-        "raw" /
-        "train.csv"
+    set_seed(
+        RANDOM_SEED
     )
 
-    image_dir = (
-        PROJECT_ROOT /
-        "data" /
-        "raw" /
-        "train_images"
-    )
-
-    if not csv_path.exists():
-        raise FileNotFoundError(
-            f"Dataset CSV not found:\n{csv_path}"
-        )
-
-    if not image_dir.exists():
-        raise FileNotFoundError(
-            f"Image directory not found:\n{image_dir}"
-        )
 
     # --------------------------------------------------------
-    # Load CSV
+    # DEVICE
     # --------------------------------------------------------
-
-    df = pd.read_csv(csv_path)
-
-    print()
-    print("=" * 70)
-    print("DATASET")
-    print("=" * 70)
 
     print(
-        f"Total images: {len(df)}"
+        f"\nDevice: {DEVICE}"
     )
 
+    if torch.cuda.is_available():
+
+        print(
+            "GPU:",
+            torch.cuda.get_device_name(0)
+        )
+
+
     # --------------------------------------------------------
-    # Stratified split
+    # PATH CHECK
+    # --------------------------------------------------------
+
+    if not TRAIN_CSV.exists():
+
+        raise FileNotFoundError(
+            f"Training CSV not found: {TRAIN_CSV}"
+        )
+
+
+    if not TRAIN_IMAGE_DIR.exists():
+
+        raise FileNotFoundError(
+            f"Image directory not found: "
+            f"{TRAIN_IMAGE_DIR}"
+        )
+
+
+    # --------------------------------------------------------
+    # LOAD CSV
+    # --------------------------------------------------------
+
+    df = pd.read_csv(
+        TRAIN_CSV
+    )
+
+
+    required_columns = {
+        "id_code",
+        "diagnosis"
+    }
+
+
+    missing_columns = (
+        required_columns -
+        set(df.columns)
+    )
+
+
+    if missing_columns:
+
+        raise ValueError(
+            f"Missing CSV columns: "
+            f"{missing_columns}"
+        )
+
+
+    print(
+        f"\nTotal dataset images: {len(df)}"
+    )
+
+
+    # --------------------------------------------------------
+    # CHECK LABELS
+    # --------------------------------------------------------
+
+    print(
+        "\nClass distribution:"
+    )
+
+    print(
+        df["diagnosis"]
+        .value_counts()
+        .sort_index()
+    )
+
+
+    # --------------------------------------------------------
+    # STRATIFIED SPLIT
     # --------------------------------------------------------
 
     train_df, val_df = train_test_split(
         df,
         test_size=VALIDATION_SIZE,
         stratify=df["diagnosis"],
-        random_state=RANDOM_SEED
+        random_state=SPLIT_RANDOM_STATE
     )
 
-    train_df = train_df.reset_index(drop=True)
-    val_df = val_df.reset_index(drop=True)
 
     print(
-        f"Training images: {len(train_df)}"
+        f"\nTraining samples: {len(train_df)}"
     )
 
     print(
-        f"Validation images: {len(val_df)}"
+        f"Validation samples: {len(val_df)}"
     )
 
-    # --------------------------------------------------------
-    # Dataset distributions
-    # --------------------------------------------------------
-
-    print()
-    print("Training class distribution:")
-
-    train_counts = (
-        train_df["diagnosis"]
-        .value_counts()
-        .sort_index()
-    )
-
-    for class_id in range(NUM_CLASSES):
-
-        count = int(
-            train_counts.get(
-                class_id,
-                0
-            )
-        )
-
-        print(
-            f"  {class_id} - "
-            f"{CLASS_NAMES[class_id]:<20}: "
-            f"{count}"
-        )
-
-    print()
-    print("Validation class distribution:")
-
-    val_counts = (
-        val_df["diagnosis"]
-        .value_counts()
-        .sort_index()
-    )
-
-    for class_id in range(NUM_CLASSES):
-
-        count = int(
-            val_counts.get(
-                class_id,
-                0
-            )
-        )
-
-        print(
-            f"  {class_id} - "
-            f"{CLASS_NAMES[class_id]:<20}: "
-            f"{count}"
-        )
-
-    # ========================================================
-    # TRANSFORMS
-    # ========================================================
-
-    print()
-    print("=" * 70)
-    print("CREATING DATASETS")
-    print("=" * 70)
-
-    # Training augmentation
-    train_transform = transforms.Compose([
-
-        transforms.Resize(
-            (IMAGE_SIZE, IMAGE_SIZE)
-        ),
-
-        transforms.RandomHorizontalFlip(
-            p=0.5
-        ),
-
-        transforms.RandomRotation(
-            degrees=15
-        ),
-
-        transforms.RandomAffine(
-            degrees=0,
-            translate=(0.05, 0.05),
-            scale=(0.95, 1.05)
-        ),
-
-        transforms.ColorJitter(
-            brightness=0.20,
-            contrast=0.20,
-            saturation=0.15,
-            hue=0.03
-        ),
-
-        transforms.ToTensor(),
-
-        transforms.Normalize(
-            mean=[
-                0.485,
-                0.456,
-                0.406
-            ],
-            std=[
-                0.229,
-                0.224,
-                0.225
-            ]
-        ),
-    ])
-
-    # Validation must remain deterministic
-    val_transform = transforms.Compose([
-
-        transforms.Resize(
-            (IMAGE_SIZE, IMAGE_SIZE)
-        ),
-
-        transforms.ToTensor(),
-
-        transforms.Normalize(
-            mean=[
-                0.485,
-                0.456,
-                0.406
-            ],
-            std=[
-                0.229,
-                0.224,
-                0.225
-            ]
-        ),
-    ])
 
     # --------------------------------------------------------
-    # Dataset objects
+    # DATASETS
     # --------------------------------------------------------
 
     train_dataset = DRDataset(
         dataframe=train_df,
-        image_dir=image_dir,
-        transform=train_transform
+        image_dir=TRAIN_IMAGE_DIR,
+        transform=get_train_transforms(
+            IMAGE_SIZE
+        )
     )
+
 
     val_dataset = DRDataset(
         dataframe=val_df,
-        image_dir=image_dir,
-        transform=val_transform
+        image_dir=TRAIN_IMAGE_DIR,
+        transform=get_val_transforms(
+            IMAGE_SIZE
+        )
     )
 
+
     # --------------------------------------------------------
-    # DataLoaders
+    # DATALOADERS
     # --------------------------------------------------------
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        num_workers=0,
-        pin_memory=(
-            DEVICE.type == "cuda"
+        num_workers=NUM_WORKERS,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=(
+            NUM_WORKERS > 0
         )
     )
+
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,
-        num_workers=0,
-        pin_memory=(
-            DEVICE.type == "cuda"
+        num_workers=NUM_WORKERS,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=(
+            NUM_WORKERS > 0
         )
     )
 
-    # ========================================================
+
+    # --------------------------------------------------------
     # CLASS WEIGHTS
-    # ========================================================
+    # --------------------------------------------------------
 
-    print()
-    print("=" * 70)
-    print("CALCULATING CLASS WEIGHTS")
-    print("=" * 70)
-
-    class_counts = np.array([
-        train_counts.get(
-            class_id,
-            0
-        )
-        for class_id in range(NUM_CLASSES)
-    ])
-
-    total_samples = class_counts.sum()
-
-    # Balanced weighting:
-    # N / (number_of_classes * class_count)
-    class_weights = (
-        total_samples /
-        (
-            NUM_CLASSES *
-            class_counts
-        )
+    class_weights = calculate_class_weights(
+        train_df["diagnosis"].values,
+        NUM_CLASSES
     )
 
-    class_weights = (
-        class_weights /
-        class_weights.mean()
+
+    class_weights = class_weights.to(
+        DEVICE
     )
 
-    class_weights_tensor = torch.tensor(
-        class_weights,
-        dtype=torch.float32,
-        device=DEVICE
+
+    print(
+        "\nClass weights:"
     )
 
-    for class_id in range(NUM_CLASSES):
+    for i, weight in enumerate(
+        class_weights.cpu().numpy()
+    ):
 
         print(
-            f"{class_id} - "
-            f"{CLASS_NAMES[class_id]:<20}: "
-            f"{class_weights[class_id]:.4f}"
+            f"{i} - "
+            f"{CLASS_NAMES[i]}: "
+            f"{weight:.4f}"
         )
 
-    # ========================================================
-    # MODEL
-    # ========================================================
 
-    print()
-    print("=" * 70)
-    print("CREATING MODEL")
-    print("=" * 70)
+    # --------------------------------------------------------
+    # MODEL
+    # --------------------------------------------------------
 
     model = create_model(
         num_classes=NUM_CLASSES,
         device=DEVICE
     )
 
-    print(
-        "✓ EfficientNet-B0 initialized "
-        "with ImageNet pretrained weights"
-    )
 
-    # ========================================================
+    # --------------------------------------------------------
     # LOSS
-    # ========================================================
-
-    print()
-    print("=" * 70)
-    print("LOSS FUNCTION")
-    print("=" * 70)
-
-    print("Using Focal Loss")
-    print("Gamma: 2.0")
-    print("Class weighting: enabled")
+    # --------------------------------------------------------
 
     criterion = FocalLoss(
-        alpha=class_weights_tensor,
-        gamma=2.0
+        alpha=class_weights,
+        gamma=FOCAL_GAMMA
     )
 
-    # ========================================================
+
+    # --------------------------------------------------------
     # OPTIMIZER
-    # ========================================================
+    # --------------------------------------------------------
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -711,189 +545,165 @@ def main():
         weight_decay=WEIGHT_DECAY
     )
 
-    # ========================================================
-    # LR SCHEDULER
-    # ========================================================
+
+    # --------------------------------------------------------
+    # SCHEDULER
+    # --------------------------------------------------------
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="max",
-        factor=0.5,
-        patience=2,
-        min_lr=1e-7
+        factor=SCHEDULER_FACTOR,
+        patience=SCHEDULER_PATIENCE,
+        min_lr=MIN_LR
     )
 
-    # ========================================================
-    # TRAINING SETTINGS
-    # ========================================================
+
+    # --------------------------------------------------------
+    # BEST MODEL TRACKING
+    # --------------------------------------------------------
 
     best_macro_f1 = -1.0
+
     best_accuracy = 0.0
 
     best_epoch = 0
 
     epochs_without_improvement = 0
 
-    early_stopping_patience = 5
 
-    weights_dir = (
-        PROJECT_ROOT /
-        "weights"
-    )
-
-    weights_dir.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    # IMPORTANT:
-    # Save the new experiment separately.
-    new_model_path = (
-        weights_dir /
-        "dr_model_focal.pth"
-    )
-
-    # ========================================================
+    # --------------------------------------------------------
     # TRAINING LOOP
-    # ========================================================
-
-    print()
-    print("=" * 70)
-    print("STARTING TRAINING")
-    print("=" * 70)
+    # --------------------------------------------------------
 
     print(
-        f"Epochs: {NUM_EPOCHS}"
+        "\nStarting training..."
     )
 
-    print(
-        f"Batch size: {BATCH_SIZE}"
-    )
-
-    print(
-        f"Learning rate: {LEARNING_RATE}"
-    )
-
-    print(
-        f"Early stopping patience: "
-        f"{early_stopping_patience}"
-    )
-
-    print()
 
     for epoch in range(
         1,
         NUM_EPOCHS + 1
     ):
 
-        print("-" * 70)
+        print(
+            "\n" + "=" * 70
+        )
 
         print(
             f"Epoch {epoch}/{NUM_EPOCHS}"
         )
 
+        print(
+            "=" * 70
+        )
+
+
         # ----------------------------------------------------
-        # Training
+        # TRAIN
         # ----------------------------------------------------
 
         train_loss, train_metrics = train_one_epoch(
-            model=model,
-            loader=train_loader,
-            criterion=criterion,
-            optimizer=optimizer,
-            device=DEVICE
+            model,
+            train_loader,
+            criterion,
+            optimizer,
+            DEVICE
         )
 
+
         # ----------------------------------------------------
-        # Validation
+        # VALIDATION
         # ----------------------------------------------------
 
         val_loss, val_metrics = validate(
-            model=model,
-            loader=val_loader,
-            criterion=criterion,
-            device=DEVICE
+            model,
+            val_loader,
+            criterion,
+            DEVICE
         )
 
+
         # ----------------------------------------------------
-        # Current learning rate
+        # PRINT
         # ----------------------------------------------------
 
         current_lr = optimizer.param_groups[0]["lr"]
 
-        # ----------------------------------------------------
-        # Print
-        # ----------------------------------------------------
 
         print(
-            f"Train Loss      : "
+            f"\nLearning Rate: {current_lr:.8f}"
+        )
+
+
+        print(
+            f"Train Loss: "
             f"{train_loss:.4f}"
         )
 
         print(
-            f"Train Accuracy  : "
+            f"Train Accuracy: "
             f"{train_metrics['accuracy']:.4f}"
         )
 
         print(
-            f"Train Macro-F1  : "
+            f"Train Macro-F1: "
             f"{train_metrics['macro_f1']:.4f}"
         )
 
+
         print(
-            f"Val Loss        : "
+            f"\nVal Loss: "
             f"{val_loss:.4f}"
         )
 
         print(
-            f"Val Accuracy    : "
+            f"Val Accuracy: "
             f"{val_metrics['accuracy']:.4f}"
         )
 
         print(
-            f"Val Precision   : "
-            f"{val_metrics['macro_precision']:.4f}"
+            f"Val Precision: "
+            f"{val_metrics['precision']:.4f}"
         )
 
         print(
-            f"Val Recall      : "
-            f"{val_metrics['macro_recall']:.4f}"
+            f"Val Recall: "
+            f"{val_metrics['recall']:.4f}"
         )
 
         print(
-            f"Val Macro-F1    : "
+            f"Val Macro-F1: "
             f"{val_metrics['macro_f1']:.4f}"
         )
 
         print(
-            f"Val Weighted-F1 : "
+            f"Val Weighted-F1: "
             f"{val_metrics['weighted_f1']:.4f}"
         )
 
-        print(
-            f"Learning Rate   : "
-            f"{current_lr:.8f}"
-        )
 
         # ----------------------------------------------------
-        # Scheduler
+        # SCHEDULER
         # ----------------------------------------------------
 
         scheduler.step(
             val_metrics["macro_f1"]
         )
 
+
         # ----------------------------------------------------
-        # Save best model
+        # BEST MODEL
         # ----------------------------------------------------
 
-        current_macro_f1 = (
+        if (
             val_metrics["macro_f1"]
-        )
+            > best_macro_f1
+        ):
 
-        if current_macro_f1 > best_macro_f1:
-
-            best_macro_f1 = current_macro_f1
+            best_macro_f1 = (
+                val_metrics["macro_f1"]
+            )
 
             best_accuracy = (
                 val_metrics["accuracy"]
@@ -903,7 +713,17 @@ def main():
 
             epochs_without_improvement = 0
 
+
+            MODEL_SAVE_PATH.parent.mkdir(
+                parents=True,
+                exist_ok=True
+            )
+
+
             checkpoint = {
+
+                "epoch": epoch,
+
                 "model_state_dict":
                     model.state_dict(),
 
@@ -923,129 +743,96 @@ def main():
                     CLASS_NAMES,
 
                 "class_weights":
-                    class_weights.tolist(),
+                    class_weights.cpu(),
 
-                "epoch":
-                    epoch,
-
-                "loss_function":
-                    "FocalLoss",
-
-                "focal_gamma":
-                    2.0,
             }
+
 
             torch.save(
                 checkpoint,
-                new_model_path
+                MODEL_SAVE_PATH
             )
 
-            print()
+
             print(
-                "✓ NEW BEST MODEL SAVED"
+                "\n*** New best model saved ***"
             )
 
             print(
-                f"  Macro-F1: "
+                f"Best Macro-F1: "
                 f"{best_macro_f1:.4f}"
             )
 
-            print(
-                f"  Accuracy: "
-                f"{best_accuracy:.4f}"
-            )
-
-            print(
-                f"  Path: "
-                f"{new_model_path}"
-            )
 
         else:
 
             epochs_without_improvement += 1
 
-            print()
+
             print(
-                f"No improvement "
-                f"({epochs_without_improvement}/"
-                f"{early_stopping_patience})"
+                f"\nNo improvement."
+                f" Patience: "
+                f"{epochs_without_improvement}/"
+                f"{EARLY_STOPPING_PATIENCE}"
             )
 
+
         # ----------------------------------------------------
-        # Early stopping
+        # EARLY STOPPING
         # ----------------------------------------------------
 
         if (
             epochs_without_improvement
-            >= early_stopping_patience
+            >= EARLY_STOPPING_PATIENCE
         ):
 
-            print()
             print(
-                "=" * 70
-            )
-
-            print(
-                "EARLY STOPPING"
-            )
-
-            print(
-                "=" * 70
-            )
-
-            print(
-                f"No Macro-F1 improvement "
-                f"for {early_stopping_patience} epochs."
+                "\nEarly stopping triggered."
             )
 
             break
 
-    # ========================================================
-    # FINAL SUMMARY
-    # ========================================================
 
-    print()
-    print("=" * 70)
-    print("TRAINING COMPLETED")
-    print("=" * 70)
+    # --------------------------------------------------------
+    # FINAL SUMMARY
+    # --------------------------------------------------------
 
     print(
-        f"Best Epoch          : "
+        "\n" + "=" * 70
+    )
+
+    print(
+        "TRAINING COMPLETE"
+    )
+
+    print(
+        "=" * 70
+    )
+
+
+    print(
+        f"Best Epoch: "
         f"{best_epoch}"
     )
 
     print(
-        f"Best Validation "
-        f"Macro-F1           : "
+        f"Best Validation Macro-F1: "
         f"{best_macro_f1:.4f}"
     )
 
     print(
-        f"Best Validation "
-        f"Accuracy           : "
+        f"Best Validation Accuracy: "
         f"{best_accuracy:.4f}"
     )
 
     print(
-        f"Model saved at      : "
-        f"{new_model_path}"
-    )
-
-    print()
-    print(
-        "IMPORTANT:"
+        f"Model saved to:"
+        f"\n{MODEL_SAVE_PATH}"
     )
 
     print(
-        "The original dr_model.pth was NOT overwritten."
+        "=" * 70
     )
-
-    print(
-        "The new Focal Loss model is saved as "
-        "dr_model_focal.pth."
-    )
-
-    print("=" * 70)
 
 
 # ============================================================
@@ -1053,4 +840,5 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
+
     main()

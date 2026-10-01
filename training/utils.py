@@ -3,6 +3,17 @@ import random
 import numpy as np
 import torch
 
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+)
+
+
+# ============================================================
+# RANDOM SEED
+# ============================================================
 
 def set_seed(seed=42):
 
@@ -14,23 +25,101 @@ def set_seed(seed=42):
 
     if torch.cuda.is_available():
 
+        torch.cuda.manual_seed(seed)
+
         torch.cuda.manual_seed_all(seed)
 
+    torch.backends.cudnn.deterministic = False
 
-def calculate_accuracy(
-    outputs,
-    labels
+    torch.backends.cudnn.benchmark = True
+
+
+# ============================================================
+# METRICS
+# ============================================================
+
+def calculate_metrics(
+    targets,
+    predictions
 ):
 
-    predictions = torch.argmax(
-        outputs,
-        dim=1
+    accuracy = accuracy_score(
+        targets,
+        predictions
     )
 
-    correct = (
-        predictions == labels
-    ).sum().item()
+    precision = precision_score(
+        targets,
+        predictions,
+        average="macro",
+        zero_division=0
+    )
 
-    total = labels.size(0)
+    recall = recall_score(
+        targets,
+        predictions,
+        average="macro",
+        zero_division=0
+    )
 
-    return correct / total
+    macro_f1 = f1_score(
+        targets,
+        predictions,
+        average="macro",
+        zero_division=0
+    )
+
+    weighted_f1 = f1_score(
+        targets,
+        predictions,
+        average="weighted",
+        zero_division=0
+    )
+
+    return {
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "macro_f1": macro_f1,
+        "weighted_f1": weighted_f1,
+    }
+
+
+# ============================================================
+# CLASS WEIGHTS
+# ============================================================
+
+def calculate_class_weights(
+    labels,
+    num_classes=5
+):
+
+    labels = np.asarray(labels)
+
+    class_counts = np.bincount(
+        labels,
+        minlength=num_classes
+    )
+
+    total = len(labels)
+
+    weights = []
+
+    for count in class_counts:
+
+        if count == 0:
+
+            weights.append(0.0)
+
+        else:
+
+            weight = total / (
+                num_classes * count
+            )
+
+            weights.append(weight)
+
+    return torch.tensor(
+        weights,
+        dtype=torch.float32
+    )

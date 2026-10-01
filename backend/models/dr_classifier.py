@@ -1,5 +1,4 @@
 import torch
-
 from torch import nn
 
 from torchvision.models import (
@@ -26,6 +25,7 @@ class DRClassifier(nn.Module):
             input_features,
             num_classes
         )
+
 
     def forward(self, x):
 
