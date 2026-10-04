@@ -1,0 +1,17 @@
+{
+    "image": "data\\raw\\train_images\\000c1434d8d7.png",
+    "fold_scores": [
+        1.1808030605316162,
+        -0.30469024181365967,
+        3.204566478729248,
+        -2.333448886871338,
+        1.4130829572677612
+    ],
+    "mean_raw_score": 0.6320626735687256,
+    "fold_spread": 1.8547587100741665,
+    "grade": 0,
+    "label": "No DR",
+    "referable": false,
+    "uncertainty": "high",
+    "total_inference_seconds": 0.2837680999946315
+}

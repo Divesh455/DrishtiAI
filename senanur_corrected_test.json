@@ -1,0 +1,33 @@
+{
+    "image": "data\\raw\\train_images\\000c1434d8d7.png",
+    "fold_scores": [
+        1.5476325750350952,
+        2.4860544204711914,
+        2.2314984798431396,
+        1.9995977878570557,
+        2.433199882507324
+    ],
+    "fold_grades": [
+        2,
+        3,
+        2,
+        2,
+        3
+    ],
+    "mean_raw_score": 2.139596629142761,
+    "fold_spread": 0.3419657698184157,
+    "grade": 2,
+    "grade_label": "Moderate",
+    "referable": true,
+    "preprocessing": {
+        "quality_check": true,
+        "auto_crop": true,
+        "crop_tol": 7,
+        "clahe": false,
+        "square_mode": "pad",
+        "preprocess_size": 512,
+        "model_input_size": 384,
+        "imagenet_normalization": true
+    },
+    "inference_seconds": 0.3825698000000557
+}
